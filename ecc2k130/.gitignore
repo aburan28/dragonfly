@@ -1,0 +1,6 @@
+*.ptx
+*.cubin
+ecc2k130
+ecc2k130-cpu
+__pycache__/
+*.o

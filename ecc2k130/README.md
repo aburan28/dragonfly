@@ -15,12 +15,16 @@ code that would run on a GPU is what the test suite exercises.
 |---|---|
 | Field arithmetic, iteration function, solver | implemented and tested |
 | End-to-end discrete logarithms | recovered on `GF(2^23)` and `GF(2^41)` |
-| CPU client | measured, 4.4 M iterations/s per core |
-| CUDA client | compiles and register-allocates; **never run on a GPU** |
+| CPU client | measured, 12.6 M iterations/s per core |
+| CUDA client | host and device both compile; **never run on a GPU here** |
+| Modal integration | validate, benchmark, autotune, search, fan out |
 
-No GPU was available while this was written. Everything reported as measured
-was measured; the GPU numbers below are register and code-size facts obtained
-from `ptxas` offline, not throughput.
+No GPU was available while this was written, so the CUDA path is verified by
+compiling it — host and device halves, plus `ptxas` register allocation — and
+by running the identical arithmetic on the CPU. `modal_app.py` exists to close
+that gap: it builds the client on a Modal GPU, runs the same validation there,
+recovers discrete logarithms on the device, and autotunes the build knobs
+against real hardware.
 
 ## The problem
 
@@ -35,6 +39,14 @@ Expected work is `2^60.9` iterations, producing about `2^35.6` distinguished
 points.
 
 ## Design
+
+### Word width
+
+One word operation advances `W` walks at once. The device uses 32-bit words,
+and the host picks the widest it has: AVX-512 gives 512 lanes and, through
+`vpternlogd`, the same single-instruction three-input logic that `LOP3.LUT`
+gives on the GPU. The arithmetic source is identical for all three widths;
+only `bitslice.h` changes.
 
 ### Field representation
 
@@ -137,21 +149,25 @@ each instance takes well under a second on four cores.
 
 ### Throughput
 
-Measured on one core of a 2.1 GHz Xeon, `GF(2^131)`, 64-bit lanes, best of
-three runs:
+Measured on one core of a 2.1 GHz Xeon, `GF(2^131)`, median of five runs:
 
-| Karatsuba leaf | iterations/s | cycles/iteration |
-|---|---|---|
-| 9 | 3.60 M | 583 |
-| 17 (default) | 4.42 M | 475 |
-| 33 | 4.74 M | 443 |
+| word | lanes | batch | iterations/s | cycles/iteration |
+|---|---|---|---|---|
+| `uint64_t` | 64 | 16 | 4.42 M | 475 |
+| AVX2 | 256 | 32 | 10.7 M | 196 |
+| AVX-512 | 512 | 32 | 12.6 M | 167 |
 
-Four threads reach 14.5 M iterations/s, a 3.2x scaling that is consistent with
-the loop being partly memory bound.
+Four threads reach 40 M iterations/s. For comparison, the 2009 hand-written
+qhasm implementation reached 533 cycles/iteration on a Core 2 with 128-bit
+vectors.
 
-For comparison, the 2009 hand-written qhasm implementation reached 533
-cycles/iteration on a Core 2 with 128-bit vectors. This is portable C from a
-generator, with half the lane width, and it is in the same range.
+The batch size matters more than cache pressure would suggest: going from 4 to
+32 walks per inversion is worth 60% because it drives the amortised inversion
+from 25% of the multiplication budget down to 3%.
+
+| Karatsuba leaf | 9 | 17 (default) | 33 |
+|---|---|---|---|
+| instructions per 131-bit multiply | 8859 | 8859 | 10701 |
 
 ### Device resources (offline, `ptxas` 12.9, no GPU)
 
@@ -220,6 +236,34 @@ bandwidth about 8x. Anything that reduces bytes per walk-step is now worth more
 than anything that reduces bit operations, which is the opposite of the tradeoff
 the original design faced.
 
+## Running on Modal
+
+`modal_app.py` builds the client into a CUDA image (a fat binary covering
+Ampere through Blackwell) and exposes five entry points:
+
+```
+modal run modal_app.py::validate --gpu H100        # correctness, on the device
+modal run modal_app.py::bench --gpu B200           # throughput
+modal run modal_app.py::autotune --gpu RTX-PRO-6000
+modal run modal_app.py::search --gpu H100 --hours 4
+modal run modal_app.py::fanout --gpu H100 --count 8 --hours 4
+modal run modal_app.py::merge                      # collisions across all runs
+```
+
+`validate` runs the whole test suite on the GPU machine and then recovers
+planted discrete logarithms with the CUDA engine itself, so a GPU run proves the
+same thing the CPU run does. `autotune` rebuilds for the local compute
+capability only and sweeps batch size, block size and Karatsuba leaf, writing
+the ranking to a Modal Volume. `search` collects distinguished points into that
+same volume, so runs are resumable and several containers contribute to one
+corpus; each gets its own run id, which keeps their seed spaces disjoint.
+`merge` scans the corpus for repeated hashes, which are the candidate
+collisions.
+
+`RTX-PRO-6000` is the interesting target: it is the GB202 part the guide
+identifies as the best value for this workload, since none of a datacenter
+GPU's tensor silicon is reachable from binary-field arithmetic.
+
 ## Build
 
 ```
@@ -229,11 +273,13 @@ make test         # validation suite
 make break-small  # end-to-end discrete logarithms on the small curves
 make bench        # throughput on the challenge curve
 make gpu          # CUDA client (needs nvcc)
+make check-cuda   # type-check host and device with clang, no GPU or nvcc needed
 make ptx          # device compile + ptxas report, no GPU needed
 ```
 
-Build-time knobs: `BATCH` (walks batched per inversion, default 16), `THREADS`
-(CUDA block size), and `--leaf` to the generator (Karatsuba leaf size).
+Build-time knobs: `BATCH` (walks batched per inversion, default 32), `THREADS`
+(CUDA block size), `MARCH` (host architecture; `native` picks the widest word),
+and `--leaf` to the generator (Karatsuba leaf size).
 
 ```
 ./ecc2k130-cpu --curve 131 --bench
@@ -243,10 +289,15 @@ Build-time knobs: `BATCH` (walks batched per inversion, default 16), `THREADS`
 
 ## What is not done
 
-* No GPU run. Throughput on real hardware is unmeasured, and the §6 layout
-  question — one thread per bitsliced multiply versus 32 threads cooperating —
-  is only partly answered: the register data says the leaf fits comfortably, but
-  the 22 KB per-thread stack frame means occupancy needs measurement.
+* No GPU run from here. Throughput on real hardware is unmeasured; the Modal
+  app is the way to get it. The §6 layout question — one thread per bitsliced
+  multiply versus 32 threads cooperating — is only partly answered: the register
+  data says the leaf fits comfortably, but the 16.4 KB per-thread stack frame
+  means occupancy needs measurement.
+* The multiplier is optimal only within the Karatsuba family. Toom-3 over
+  GF(2), which is where Bernstein's 11961-bit-operation chain comes from, is not
+  implemented; a search over balanced and unbalanced Karatsuba splits and the
+  guide's 128+3 decomposition found nothing better than 8859 instructions.
 * No server. Distinguished points can be written to a file and reloaded, but
   there is no UDP protocol, no hash-routed sharding, and no multi-machine
   merging.

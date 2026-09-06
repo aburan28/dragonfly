@@ -17,13 +17,20 @@ CXX     ?= g++
 CLANG   ?= clang
 PTXAS   ?= ptxas
 CUDAPATH ?= /usr/local/cuda
-BATCH   ?= 16
+BATCH   ?= 32
 THREADS ?= 128
+# The CPU build picks the widest word the target supports (AVX-512 -> 512 lanes,
+# AVX2 -> 256, otherwise 64).  Use a portable baseline when the build machine
+# and the run machine may differ.
+MARCH   ?= native
 ARCH    ?= -gencode arch=compute_80,code=sm_80 \
            -gencode arch=compute_86,code=sm_86 \
            -gencode arch=compute_89,code=sm_89 \
            -gencode arch=compute_90,code=sm_90 \
            -gencode arch=compute_120,code=sm_120
+# clang emits PTX for CLANGARCH; ptxas then compiles that PTX for SMARCH, which
+# may be newer than any architecture clang itself knows about (e.g. sm_120).
+CLANGARCH ?= sm_90
 SMARCH  ?= sm_90
 
 HDRS = include/bitslice.h include/fieldbs.h include/walk.h include/kernel.h \
@@ -40,8 +47,8 @@ generate:
 cpu: ecc2k130-cpu
 
 ecc2k130-cpu: src/main.cu $(HDRS) $(GEN)
-	$(CXX) -O3 -std=c++17 -march=native -fopenmp $(DEFS) -DECC_NO_CUDA \
-	    -Wall -Wno-unused-function -x c++ src/main.cu -o $@
+	$(CXX) -O3 -std=c++17 -march=$(MARCH) -fopenmp $(DEFS) -DECC_NO_CUDA \
+	    -Wall -Wno-unused-function -Wno-unknown-pragmas -x c++ src/main.cu -o $@
 
 gpu: ecc2k130
 
@@ -64,13 +71,29 @@ break-small: ecc2k130-cpu
 bench: ecc2k130-cpu
 	./ecc2k130-cpu --curve 131 --bench --steps 32 --launches 8 --verify 0
 
+# Type-check the whole CUDA translation unit, host and device, with clang.
+# Needs no GPU and no nvcc, only a CUDA include tree at CUDAPATH.
+check-cuda: src/main.cu $(HDRS) $(GEN)
+	printf '#include <cuda_runtime.h>\nextern "C" cudaError_t cudaConfigureCall(dim3, dim3, size_t, cudaStream_t);\n' > build/cudashim.h
+	$(CLANG) -x cuda --cuda-host-only --cuda-path=$(CUDAPATH) -nocudalib \
+	    -Wno-unknown-cuda-version -O2 -std=c++17 $(DEFS) -include build/cudashim.h \
+	    -c src/main.cu -o build/main_host.o
+	$(CLANG) -x cuda --cuda-device-only --cuda-gpu-arch=$(CLANGARCH) --cuda-path=$(CUDAPATH) \
+	    -nocudalib -Wno-unknown-cuda-version -O3 -std=c++17 $(DEFS) \
+	    -include build/cudashim.h -S -o build/main_dev.ptx src/main.cu
+	$(PTXAS) -arch=$(SMARCH) -O3 -v build/main_dev.ptx -o build/main_dev.cubin
+
 # Offline device compile: no GPU needed, reports registers, spills and size.
 ptx: src/ptxspike.cu $(HDRS) $(GEN)
-	$(CLANG) -x cuda --cuda-device-only --cuda-gpu-arch=$(SMARCH) --cuda-path=$(CUDAPATH) \
+	$(CLANG) -x cuda --cuda-device-only --cuda-gpu-arch=$(CLANGARCH) --cuda-path=$(CUDAPATH) \
 	    -nocudalib -Wno-unknown-cuda-version -O3 -std=c++17 $(DEFS) -S -o build/spike.ptx src/ptxspike.cu
 	$(PTXAS) -arch=$(SMARCH) -O3 -v build/spike.ptx -o build/spike.cubin
 
-clean:
-	rm -f ecc2k130 ecc2k130-cpu build/spike.ptx build/spike.cubin
+# Run on Modal GPUs (see modal_app.py).
+modal:
+	modal run modal_app.py::bench --gpu H100
 
-.PHONY: all generate cpu gpu test break-small bench ptx clean
+clean:
+	rm -f ecc2k130 ecc2k130-cpu build/*.ptx build/*.cubin build/*.o build/cudashim.h
+
+.PHONY: all generate cpu gpu test break-small bench ptx check-cuda modal clean

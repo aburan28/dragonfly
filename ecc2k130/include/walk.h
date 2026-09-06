@@ -114,17 +114,24 @@ struct Walk {
     // ---- fresh starting point:  R = Q + sum_i c_i sigma^i(P) -----------
     // c is a 128-bit string derived from the walk seed, per lane.
     static ECC_BIG void startPoint(const unsigned long long *seeds, const CurveConsts &K, W *x, W *y) {
-        W cbit[STARTTERMS];
+        const int NG = LANES / 64 > 0 ? LANES / 64 : 1;
+        unsigned long long cw[STARTTERMS][(LANES / 64) > 0 ? (LANES / 64) : 1];
 #pragma unroll 1
-        for (int i = 0; i < STARTTERMS; ++i) cbit[i] = ECC_ZERO;
+        for (int i = 0; i < STARTTERMS; ++i)
+            for (int g = 0; g < NG; ++g) cw[i][g] = 0;
         for (int lane = 0; lane < LANES; ++lane) {
             const unsigned long long c0 = eccPrf(seeds[lane], 0);
             const unsigned long long c1 = eccPrf(seeds[lane], 1);
+            const int g = (LANES >= 64) ? (lane >> 6) : 0;
+            const int b = (LANES >= 64) ? (lane & 63) : lane;
             for (int i = 0; i < STARTTERMS; ++i) {
                 const unsigned long long bit = (i < 64) ? (c0 >> i) : (c1 >> (i - 64));
-                if (bit & 1ull) cbit[i] |= laneMask<W>(lane);
+                cw[i][g] |= (bit & 1ull) << b;
             }
         }
+        W cbit[STARTTERMS];
+#pragma unroll 1
+        for (int i = 0; i < STARTTERMS; ++i) cbit[i] = eccWordFromLimbs<W>(cw[i]);
         F::broadcast(K.qx, x);
         F::broadcast(K.qy, y);
         W sx[M], sy[M], ax[M], ay[M];

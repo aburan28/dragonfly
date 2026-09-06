@@ -67,7 +67,7 @@ struct Options {
 // ---------------------------------------------------------------------------
 template <class Cfg>
 struct HostEngine {
-    typedef u64 W;
+    typedef ECC_HOST_WORD W;
     typedef Kernel<Cfg, W> K;
     static const int M = Cfg::M;
     static const int LANES = WordTraits<W>::LANES;
@@ -199,7 +199,7 @@ struct CudaEngine {
         P.dpCap = o.dpCap;
         staging.resize(o.dpCap);
         const int blocks = (o.threads + ECC_THREADS - 1) / ECC_THREADS;
-        eccInitKernel<Cfg, W><<<blocks, ECC_THREADS>>>(P);
+        eccInitKernel<Cfg, W><<<blocks, ECC_THREADS, 0, 0>>>(P);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     }
@@ -207,14 +207,14 @@ struct CudaEngine {
     void launch(u64 iterBase) {
         P.iterBase = iterBase;
         const int blocks = (P.threads + ECC_THREADS - 1) / ECC_THREADS;
-        eccWalkKernel<Cfg, W><<<blocks, ECC_THREADS>>>(P);
+        eccWalkKernel<Cfg, W><<<blocks, ECC_THREADS, 0, 0>>>(P);
         CUDA_CHECK(cudaGetLastError());
     }
 
     void reseed(u64 iterBase) {
         P.iterBase = iterBase;
         const int blocks = (P.threads + ECC_THREADS - 1) / ECC_THREADS;
-        eccReseedKernel<Cfg, W><<<blocks, ECC_THREADS>>>(P);
+        eccReseedKernel<Cfg, W><<<blocks, ECC_THREADS, 0, 0>>>(P);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -283,11 +283,12 @@ static typename Ref<Cfg>::Point randomPoint(Rng &rng, const U192 &ell) {
 template <class Cfg>
 static void testField(Rng &rng) {
     typedef Ref<Cfg> R;
-    typedef FieldBs<Cfg, u64> F;
+    typedef ECC_HOST_WORD W;
+    typedef FieldBs<Cfg, W> F;
     const int M = Cfg::M;
-    const int LANES = 64;
+    const int LANES = WordTraits<W>::LANES;
     std::vector<typename R::Elem> a(LANES), b(LANES);
-    std::vector<u64> ba(M, 0), bb(M, 0), bc(M, 0), bd(M, 0);
+    std::vector<W> ba(M, ECC_ZERO), bb(M, ECC_ZERO), bc(M, ECC_ZERO), bd(M, ECC_ZERO);
     for (int l = 0; l < LANES; ++l) {
         a[l] = randomElem<Cfg>(rng);
         b[l] = randomElem<Cfg>(rng);
@@ -319,11 +320,11 @@ static void testField(Rng &rng) {
         F::getLane(bc.data(), l, got.v);
         if (!(got == R::sigma(a[l], 7))) okSig = false;
     }
-    std::vector<u64> hb(Cfg::HWBITS > 4 ? Cfg::HWBITS : 4, 0);
+    std::vector<W> hb(Cfg::HWBITS > 4 ? Cfg::HWBITS : 4, ECC_ZERO);
     Cfg::hamming(ba.data(), hb.data());
     for (int l = 0; l < LANES; ++l) {
         int got = 0;
-        for (int i = 0; i < Cfg::HWBITS; ++i) got |= (int)((hb[i] >> l) & 1) << i;
+        for (int i = 0; i < Cfg::HWBITS; ++i) got |= laneBit<W>(hb[i], l) << i;
         if (got != R::weight(a[l])) okHw = false;
     }
     report("bitsliced multiply matches reference", okMul);
@@ -358,20 +359,22 @@ static void testOrbit(Rng &rng, const U192 &ell) {
 template <class Cfg>
 static void testStartPoint(Rng &rng, Solver<Cfg> &sol) {
     typedef Ref<Cfg> R;
-    typedef FieldBs<Cfg, u64> F;
-    typedef Walk<Cfg, u64> WK;
+    typedef ECC_HOST_WORD W;
+    typedef FieldBs<Cfg, W> F;
+    typedef Walk<Cfg, W> WK;
     const int M = Cfg::M;
-    u64 seeds[64];
-    for (int l = 0; l < 64; ++l) seeds[l] = rng.next();
-    std::vector<u64> x(M, 0), y(M, 0);
+    const int LANES = WordTraits<W>::LANES;
+    std::vector<u64> seeds(LANES);
+    for (int l = 0; l < LANES; ++l) seeds[l] = rng.next();
+    std::vector<W> x(M, ECC_ZERO), y(M, ECC_ZERO);
     CurveConsts K;
     K.px = sol.basis.x.v;
     K.py = sol.basis.y.v;
     K.qx = sol.target.x.v;
     K.qy = sol.target.y.v;
-    WK::startPoint(seeds, K, x.data(), y.data());
+    WK::startPoint(seeds.data(), K, x.data(), y.data());
     bool ok = true, okAlpha = true;
-    for (int l = 0; l < 64; ++l) {
+    for (int l = 0; l < LANES; ++l) {
         typename R::Elem gx, gy;
         F::getLane(x.data(), l, gx.v);
         F::getLane(y.data(), l, gy.v);

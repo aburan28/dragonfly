@@ -1,0 +1,24 @@
+# Distribute a zstd-compressed training corpus to every seed peer. The shards travel
+# through the P2P network compressed; status.sources[].tasks[].compression reports the
+# format of every shard so consumers know how to decompress it.
+apiVersion: data.d7y.io/v1alpha1
+kind: Dataset
+metadata:
+  name: training-corpus
+  namespace: default
+spec:
+  sources:
+    - name: corpus
+      type: file
+      urls:
+        - https://data.example.com/corpus/shard-0000.jsonl.zst
+        - https://data.example.com/corpus/shard-0001.jsonl.zst
+        - https://data.example.com/corpus/manifest.json
+      tag: v1
+      compression:
+        algorithm: auto
+  distribution:
+    scope: all_seed_peers
+  lifecycle:
+    ttl: 72h
+    deletionPolicy: Purge

@@ -246,6 +246,12 @@ func TestSourceSpecHash(t *testing.T) {
 	changedDistribution := distribution
 	changedDistribution.Scope = v1alpha1.DistributionScopeAllPeers
 	assert.NotEqual(t, base, SourceSpecHash(&source, &changedDistribution))
+
+	compressed := source
+	compressed.Compression = &v1alpha1.CompressionSpec{Algorithm: v1alpha1.CompressionAlgorithmZstd}
+	assert.Equal(t, base, SourceSpecHash(&compressed, &distribution), "compression only describes the data")
+	assert.Nil(t, source.Compression, "the caller's source is not modified")
+	assert.NotNil(t, compressed.Compression, "the caller's source is not modified")
 }
 
 func TestRetryBackoff(t *testing.T) {

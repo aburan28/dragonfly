@@ -240,8 +240,15 @@ func (l *EffectiveLifecycle) NextVerification(lastDistribution, lastVerification
 }
 
 // SourceSpecHash hashes the parts of the spec that, when changed, require the source to
-// be distributed again.
+// be distributed again. Compression only describes the data and is left out, so
+// declaring it does not redistribute data that is already on the peers.
 func SourceSpecHash(source *v1alpha1.DataSource, distribution *v1alpha1.DistributionPolicy) string {
+	if source != nil && source.Compression != nil {
+		stripped := *source
+		stripped.Compression = nil
+		source = &stripped
+	}
+
 	data, err := json.Marshal(struct {
 		Source       *v1alpha1.DataSource         `json:"source"`
 		Distribution *v1alpha1.DistributionPolicy `json:"distribution"`

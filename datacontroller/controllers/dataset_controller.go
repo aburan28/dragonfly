@@ -439,6 +439,7 @@ type sourcePlan struct {
 // the next one that is due.
 func (r *DatasetReconciler) reconcileSource(ctx context.Context, state *reconcileState, source *v1alpha1.DataSource, status *v1alpha1.DataSourceStatus, plan sourcePlan) {
 	dataset := state.dataset
+	annotateCompression(source, status)
 
 	if status.Operation != nil {
 		if !r.driveOperation(ctx, state, source, status) {

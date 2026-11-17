@@ -35,6 +35,7 @@ import (
 	"d7y.io/dragonfly/v2/datacontroller/apis/data/v1alpha1"
 	"d7y.io/dragonfly/v2/datacontroller/dragonfly"
 	managertypes "d7y.io/dragonfly/v2/manager/types"
+	"d7y.io/dragonfly/v2/pkg/compression"
 	"d7y.io/dragonfly/v2/pkg/idgen"
 	pkghttp "d7y.io/dragonfly/v2/pkg/net/http"
 )
@@ -160,7 +161,45 @@ func validateSource(source *v1alpha1.DataSource) error {
 		return fmt.Errorf("unknown source type %q", source.Type)
 	}
 
+	if source.Type == v1alpha1.DataSourceTypeImage && source.Compression != nil &&
+		source.Compression.Algorithm != "" && source.Compression.Algorithm != v1alpha1.CompressionAlgorithmNone {
+		return errors.New("image sources must not set compression, layer media types carry it")
+	}
+
 	return nil
+}
+
+// taskCompression resolves the compression format of one URL of a source. It returns
+// the empty string for uncompressed data and for sources that do not declare compression.
+func taskCompression(source *v1alpha1.DataSource, url string) string {
+	if source.Compression == nil || source.Type == v1alpha1.DataSourceTypeImage {
+		return ""
+	}
+
+	var alg compression.Algorithm
+	switch source.Compression.Algorithm {
+	case v1alpha1.CompressionAlgorithmAuto, "":
+		alg = compression.FromPath(url)
+	default:
+		var err error
+		if alg, err = compression.ParseAlgorithm(string(source.Compression.Algorithm)); err != nil {
+			return ""
+		}
+	}
+
+	if alg == compression.None {
+		return ""
+	}
+
+	return string(alg)
+}
+
+// annotateCompression records the compression format of every task of a source, so
+// a change to the declared compression is reflected without redistributing the data.
+func annotateCompression(source *v1alpha1.DataSource, status *v1alpha1.DataSourceStatus) {
+	for i := range status.Tasks {
+		status.Tasks[i].Compression = taskCompression(source, status.Tasks[i].URL)
+	}
 }
 
 // filteredQueryParams returns the filtered query params used for task IDs, falling
@@ -460,7 +499,7 @@ func evaluateDistribute(job *dragonfly.Job, source *v1alpha1.DataSource) distrib
 
 	tasks := make([]v1alpha1.TaskStatus, 0, len(successURLs))
 	for _, u := range successURLs {
-		task := v1alpha1.TaskStatus{URL: u}
+		task := v1alpha1.TaskStatus{URL: u, Compression: taskCompression(source, u)}
 		if id, err := taskID(source, u); err == nil {
 			task.ID = id
 		}

@@ -38,6 +38,25 @@ const (
 	DataSourceTypeImage DataSourceType = "image"
 )
 
+// CompressionAlgorithm is the compression format the objects of a source are stored in.
+// +kubebuilder:validation:Enum=auto;none;gzip;zstd
+type CompressionAlgorithm string
+
+const (
+	// CompressionAlgorithmAuto infers the format of every URL from its file extension
+	// (.gz, .tgz, .gzip for gzip and .zst, .zstd, .tzst for zstd).
+	CompressionAlgorithmAuto CompressionAlgorithm = "auto"
+
+	// CompressionAlgorithmNone means the objects are not compressed.
+	CompressionAlgorithmNone CompressionAlgorithm = "none"
+
+	// CompressionAlgorithmGzip means the objects are gzip streams.
+	CompressionAlgorithmGzip CompressionAlgorithm = "gzip"
+
+	// CompressionAlgorithmZstd means the objects are Zstandard streams.
+	CompressionAlgorithmZstd CompressionAlgorithm = "zstd"
+)
+
 // DistributionScope is the set of peers the data is pushed to.
 // +kubebuilder:validation:Enum=single_seed_peer;all_seed_peers;all_peers
 type DistributionScope string
@@ -144,6 +163,22 @@ type DataSource struct {
 	// blob pulled from different registries shares one task.
 	// +optional
 	EnableTaskIDBasedBlobDigest bool `json:"enableTaskIDBasedBlobDigest,omitempty"`
+
+	// Compression declares how the objects of a file source are compressed. Dragonfly
+	// distributes and caches the bytes as stored at the origin, so compressed objects
+	// travel through the P2P network compressed; the resolved format of every task is
+	// reported in the status so consumers know how to decompress what they download.
+	// Image sources carry the format in the layer media types and must not set it.
+	// +optional
+	Compression *CompressionSpec `json:"compression,omitempty"`
+}
+
+// CompressionSpec declares how the objects of a source are compressed.
+type CompressionSpec struct {
+	// Algorithm is the format of the objects. "auto" infers it from the extension of each URL.
+	// +kubebuilder:default=auto
+	// +optional
+	Algorithm CompressionAlgorithm `json:"algorithm,omitempty"`
 }
 
 // ObjectStorageSpec configures access to an object storage backend.
@@ -417,6 +452,11 @@ type TaskStatus struct {
 	// PeerCount is the number of peers holding the task at the last verification.
 	// +optional
 	PeerCount *int32 `json:"peerCount,omitempty"`
+
+	// Compression is the format the task is stored in, "gzip" or "zstd". It is empty
+	// for uncompressed tasks and for sources that do not declare compression.
+	// +optional
+	Compression string `json:"compression,omitempty"`
 }
 
 // DataSourceStatus is the observed state of a source.

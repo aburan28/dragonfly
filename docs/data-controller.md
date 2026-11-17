@@ -53,6 +53,40 @@ spec:
     deletionPolicy: Purge
 ```
 
+#### Compression
+
+A `file` source can declare that its objects are compressed with `spec.sources[].compression`.
+Dragonfly distributes and caches the bytes exactly as the origin stores them, so a compressed
+object travels through the P2P network compressed. Peers move fewer bytes, and nothing is
+recompressed on the way. The controller does not touch the data. It resolves the format of every
+task and reports it in `status.sources[].tasks[].compression` (`gzip`, `zstd`, or empty for
+uncompressed data), so consumers know how to decompress what they download.
+
+- `algorithm: auto` (the default) infers the format of each URL from its extension: `.gz`, `.tgz`
+  and `.gzip` are gzip, and `.zst`, `.zstd` and `.tzst` are zstd. Query strings are ignored.
+- `algorithm: gzip`, `zstd` or `none` applies one format to every URL of the source.
+- The compression spec is left out of the spec hash, so declaring or changing it updates the
+  status without redistributing data that is already on the peers.
+- Image sources must not set it. OCI layers carry their format in their media types.
+
+```yaml
+spec:
+  sources:
+    - name: corpus
+      type: file
+      urls:
+        - https://data.example.com/corpus/shard-0000.jsonl.zst
+        - https://data.example.com/corpus/shard-0001.jsonl.zst
+      compression:
+        algorithm: auto
+```
+
+Go consumers decompress with `d7y.io/dragonfly/v2/pkg/compression`. `NewAutoReader` detects the
+format from the magic bytes, and `WithMaxSize` fails with `ErrSizeLimit` instead of writing an
+unbounded output, which guards against decompression bombs. Elsewhere, `zstd -d` and `gzip -d`
+read the same streams. Peers do not decompress transparently, because the dfdaemon client does
+not know about compression yet.
+
 ### DataLifecyclePolicy
 
 A `DataLifecyclePolicy` applies a lifecycle to every `Dataset` in its namespace that matches its label

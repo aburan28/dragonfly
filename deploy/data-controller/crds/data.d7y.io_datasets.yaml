@@ -229,6 +229,25 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    compression:
+                      description: |-
+                        Compression declares how the objects of a file source are compressed. Dragonfly
+                        distributes and caches the bytes as stored at the origin, so compressed objects
+                        travel through the P2P network compressed; the resolved format of every task is
+                        reported in the status so consumers know how to decompress what they download.
+                        Image sources carry the format in the layer media types and must not set it.
+                      properties:
+                        algorithm:
+                          default: auto
+                          description: Algorithm is the format of the objects. "auto"
+                            infers it from the extension of each URL.
+                          enum:
+                          - auto
+                          - none
+                          - gzip
+                          - zstd
+                          type: string
+                      type: object
                     enableTaskIDBasedBlobDigest:
                       description: |-
                         EnableTaskIDBasedBlobDigest derives task IDs of OCI blob URLs from the blob digest so the same
@@ -549,6 +568,11 @@ spec:
                         description: TaskStatus is the observed state of one task
                           (a file URL or an image layer) of a source.
                         properties:
+                          compression:
+                            description: |-
+                              Compression is the format the task is stored in, "gzip" or "zstd". It is empty
+                              for uncompressed tasks and for sources that do not declare compression.
+                            type: string
                           id:
                             description: ID is the task ID in the P2P network.
                             type: string

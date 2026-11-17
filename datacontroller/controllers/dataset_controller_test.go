@@ -792,6 +792,67 @@ func TestDatasetReconciler_InvalidLifecycle(t *testing.T) {
 	assert.Equal(t, ReasonInvalidLifecycle, condition(got, v1alpha1.ConditionReady).Reason)
 }
 
+func TestDatasetReconciler_Compression(t *testing.T) {
+	urls := []string{
+		"https://example.com/weights.safetensors.zst",
+		"https://example.com/corpus.tar.gz?sig=abc",
+		"https://example.com/plain.bin",
+	}
+	ds := fileDataset("ds", urls...)
+	ds.Spec.Sources[0].Compression = &v1alpha1.CompressionSpec{Algorithm: v1alpha1.CompressionAlgorithmAuto}
+	h := newHarness(t, ds)
+	h.distribute("ds", urls...)
+
+	got := h.get("ds")
+	source := sourceStatus(got, "files")
+	require.Len(t, source.Tasks, 3)
+	formats := map[string]string{}
+	for _, task := range source.Tasks {
+		formats[task.URL] = task.Compression
+	}
+	assert.Equal(t, map[string]string{urls[0]: "zstd", urls[1]: "gzip", urls[2]: ""}, formats, "auto infers from the extension")
+
+	// Declaring an explicit format updates the status without redistributing.
+	got.Spec.Sources[0].Compression.Algorithm = v1alpha1.CompressionAlgorithmGzip
+	require.NoError(t, h.client.Update(context.Background(), got))
+	h.reconcileOK("ds")
+	got = h.get("ds")
+	for _, task := range sourceStatus(got, "files").Tasks {
+		assert.Equal(t, "gzip", task.Compression, task.URL)
+	}
+	assert.Equal(t, 1, h.manager.countJobs(dragonfly.JobTypePreheat), "compression does not redistribute")
+
+	// Removing it clears the status.
+	got.Spec.Sources[0].Compression = nil
+	require.NoError(t, h.client.Update(context.Background(), got))
+	h.reconcileOK("ds")
+	for _, task := range sourceStatus(h.get("ds"), "files").Tasks {
+		assert.Empty(t, task.Compression, task.URL)
+	}
+}
+
+func TestDatasetReconciler_ImageSourceRejectsCompression(t *testing.T) {
+	ds := &v1alpha1.Dataset{
+		ObjectMeta: metav1.ObjectMeta{Name: "img", Namespace: "default"},
+		Spec: v1alpha1.DatasetSpec{
+			Sources: []v1alpha1.DataSource{{
+				Name:        "image",
+				Type:        v1alpha1.DataSourceTypeImage,
+				URL:         "https://registry.example.com/v2/library/nginx/manifests/latest",
+				Compression: &v1alpha1.CompressionSpec{Algorithm: v1alpha1.CompressionAlgorithmGzip},
+			}},
+		},
+	}
+	h := newHarness(t, ds)
+
+	h.reconcileOK("img")
+	h.reconcileOK("img")
+	got := h.get("img")
+	assert.Equal(t, v1alpha1.DatasetPhaseFailed, got.Status.Phase)
+	assert.Equal(t, ReasonInvalidSpec, condition(got, v1alpha1.ConditionReady).Reason)
+	assert.Equal(t, 0, h.manager.countJobs(dragonfly.JobTypePreheat))
+}
+
 func TestDatasetReconciler_ImageSource(t *testing.T) {
 	ds := &v1alpha1.Dataset{
 		ObjectMeta: metav1.ObjectMeta{Name: "img", Namespace: "default"},
